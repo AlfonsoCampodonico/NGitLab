@@ -379,14 +379,16 @@ namespace NGitLab.Mock.Config
         /// <param name="sourceBranch">Source branch (required)</param>
         /// <param name="targetBranch">Target branch</param>
         /// <param name="user">Author username (required if default user not defined)</param>
+        /// <param name="deleteSourceBranch">Indicates if source branch must be deleted after merge.</param>
         /// <param name="tags">Tags.</param>
         /// <param name="configure">Configuration method</param>
-        public static GitLabProject WithMergeCommit(this GitLabProject project, string sourceBranch, string? targetBranch = null, string? user = null, IEnumerable<string>? tags = null, Action<GitLabCommit>? configure = null)
+        public static GitLabProject WithMergeCommit(this GitLabProject project, string sourceBranch, string? targetBranch = null, string? user = null, bool deleteSourceBranch = false, IEnumerable<string>? tags = null, Action<GitLabCommit>? configure = null)
         {
             return WithCommit(project, $"Merge '{sourceBranch}' into '{targetBranch ?? project.DefaultBranch}'", user, commit =>
             {
                 commit.SourceBranch = sourceBranch ?? throw new ArgumentNullException(nameof(sourceBranch));
                 commit.TargetBranch = targetBranch ?? project.DefaultBranch;
+                commit.DeleteSourceBranch = deleteSourceBranch;
                 if (tags != null)
                 {
                     foreach (var tag in tags)
@@ -760,41 +762,6 @@ namespace NGitLab.Mock.Config
                 CreateProject(server, project);
             }
 
-            foreach (var project in config.Projects)
-            {
-                if (string.IsNullOrEmpty(project.ClonePath))
-                    continue;
-
-                var projectNamespace = project.Namespace;
-                var projectName = project.Name;
-                var remoteUrl = server.AllProjects.FindProject($"{projectNamespace}/{projectName}").SshUrl;
-
-                var folderPath = Path.GetDirectoryName(Path.GetFullPath(project.ClonePath));
-                if (!Directory.Exists(folderPath))
-                    Directory.CreateDirectory(folderPath!);
-
-                // libgit2sharp cannot clone with an other folder name
-                using var process = new Process
-                {
-                    StartInfo = new ProcessStartInfo
-                    {
-                        FileName = "git",
-                        Arguments = $"clone \"{remoteUrl}\" \"{Path.GetFileName(project.ClonePath)}\"",
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        WorkingDirectory = folderPath,
-                    },
-                };
-
-                process.Start();
-                process.WaitForExit();
-                if (process.ExitCode != 0)
-                {
-                    var error = process.StandardError.ReadToEnd();
-                    throw new GitLabException($"Cannot clone '{projectNamespace}/{projectName}' in '{project.ClonePath}': {error}");
-                }
-            }
-
             return server;
         }
 
@@ -938,6 +905,34 @@ namespace NGitLab.Mock.Config
             {
                 CreatePermission(server, prj, permission);
             }
+
+            if (!string.IsNullOrEmpty(project.ClonePath))
+            {
+                var folderPath = Path.GetDirectoryName(Path.GetFullPath(project.ClonePath));
+                if (!Directory.Exists(folderPath))
+                    Directory.CreateDirectory(folderPath!);
+
+                // libgit2sharp cannot clone with an other folder name
+                using var process = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = "git",
+                        Arguments = $"clone \"{prj.SshUrl}\" \"{Path.GetFileName(project.ClonePath)}\"",
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        WorkingDirectory = folderPath,
+                    },
+                };
+
+                process.Start();
+                process.WaitForExit();
+                if (process.ExitCode != 0)
+                {
+                    var error = process.StandardError.ReadToEnd();
+                    throw new GitLabException($"Cannot clone '{prj.PathWithNamespace}' in '{project.ClonePath}': {error}");
+                }
+            }
         }
 
         private static void CreateCommit(GitLabServer server, Project prj, GitLabCommit commit)
@@ -959,6 +954,8 @@ namespace NGitLab.Mock.Config
             else
             {
                 prj.Repository.Merge(user, commit.SourceBranch, targetBranch);
+                if (commit.DeleteSourceBranch)
+                    prj.Repository.RemoveBranch(targetBranch);
             }
 
             foreach (var tag in commit.Tags)
